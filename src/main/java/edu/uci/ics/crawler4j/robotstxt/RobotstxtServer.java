@@ -1,18 +1,16 @@
 /**
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more contributor license
+ * agreements. See the NOTICE file distributed with this work for additional information regarding
+ * copyright ownership. The ASF licenses this file to You under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the License. You may obtain a
+ * copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software distributed under the License
+ * is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+ * or implied. See the License for the specific language governing permissions and limitations under
+ * the License.
  */
 
 package edu.uci.ics.crawler4j.robotstxt;
@@ -50,9 +48,16 @@ public class RobotstxtServer {
 
     protected PageFetcher pageFetcher;
 
+    private final int maxBytes;
+
     public RobotstxtServer(RobotstxtConfig config, PageFetcher pageFetcher) {
+        this(config, pageFetcher, 16384);
+    }
+
+    public RobotstxtServer(RobotstxtConfig config, PageFetcher pageFetcher, int maxBytes) {
         this.config = config;
         this.pageFetcher = pageFetcher;
+        this.maxBytes = maxBytes;
     }
 
     private static String getHost(URL url) {
@@ -61,31 +66,31 @@ public class RobotstxtServer {
 
     /** Please note that in the case of a bad URL, TRUE will be returned */
     public boolean allows(WebURL webURL) {
-        if (config.isEnabled()) {
-            try {
-                URL url = new URL(webURL.getURL());
-                String host = getHost(url);
-                String path = url.getPath();
+        if (!config.isEnabled()) {
+            return true;
+        }
+        try {
+            URL url = new URL(webURL.getURL());
+            String host = getHost(url);
+            String path = url.getPath();
 
-                HostDirectives directives = host2directivesCache.get(host);
+            HostDirectives directives = host2directivesCache.get(host);
 
-                if ((directives != null) && directives.needsRefetch()) {
-                    synchronized (host2directivesCache) {
-                        host2directivesCache.remove(host);
-                        directives = null;
-                    }
+            if (directives != null && directives.needsRefetch()) {
+                synchronized (host2directivesCache) {
+                    host2directivesCache.remove(host);
+                    directives = null;
                 }
-
-                if (directives == null) {
-                    directives = fetchDirectives(url);
-                }
-
-                return directives.allows(path);
-            } catch (MalformedURLException e) {
-                logger.error("Bad URL in Robots.txt: " + webURL.getURL(), e);
             }
+            if (directives == null) {
+                directives = fetchDirectives(url);
+            }
+            return directives.allows(path);
+        } catch (MalformedURLException e) {
+            logger.error("Bad URL in Robots.txt: " + webURL.getURL(), e);
         }
 
+        logger.warn("RobotstxtServer: default: allow", webURL.getURL());
         return true;
     }
 
@@ -94,32 +99,53 @@ public class RobotstxtServer {
         String host = getHost(url);
         String port = ((url.getPort() == url.getDefaultPort()) || (url.getPort() == -1)) ? "" :
                       (":" + url.getPort());
-        robotsTxtUrl.setURL("http://" + host + port + "/robots.txt");
+        String proto = url.getProtocol();
+        robotsTxtUrl.setURL(proto + "://" + host + port + "/robots.txt");
         HostDirectives directives = null;
         PageFetchResult fetchResult = null;
         try {
-            fetchResult = pageFetcher.fetchPage(robotsTxtUrl);
+            for (int redir = 0; redir < 3; ++redir) {
+                fetchResult = pageFetcher.fetchPage(robotsTxtUrl);
+                int status = fetchResult.getStatusCode();
+                // Follow redirects up to 3 levels
+                if ((status == HttpStatus.SC_MULTIPLE_CHOICES ||
+                     status == HttpStatus.SC_MOVED_PERMANENTLY ||
+                     status == HttpStatus.SC_MOVED_TEMPORARILY ||
+                     status == HttpStatus.SC_SEE_OTHER ||
+                     status == HttpStatus.SC_TEMPORARY_REDIRECT || status == 308) &&
+                    // SC_PERMANENT_REDIRECT RFC7538
+                    fetchResult.getMovedToUrl() != null) {
+                    robotsTxtUrl.setURL(fetchResult.getMovedToUrl());
+                    fetchResult.discardContentIfNotConsumed();
+                } else {
+                    // Done on all other occasions
+                    break;
+                }
+            }
+
             if (fetchResult.getStatusCode() == HttpStatus.SC_OK) {
                 Page page = new Page(robotsTxtUrl);
-                fetchResult.fetchContent(page);
-                String contentType = page.getContentType() == null ? "" : page.getContentType();
-                if (Util.hasPlainTextContent(contentType) || contentType.length() == 0) {
+                // Most recent answer on robots.txt max size is
+                // https://goo.gl/OqpKbP
+                fetchResult.fetchContent(page, 10_000 * 1024);
+                if (Util.hasPlainTextContent(page.getContentType())) {
                     String content;
                     if (page.getContentCharset() == null) {
                         content = new String(page.getContentData());
                     } else {
                         content = new String(page.getContentData(), page.getContentCharset());
                     }
-                    directives = RobotstxtParser.parse(content, config.getUserAgentName());
-                } else if (contentType.contains(
-                    "html")) { // TODO This one should be upgraded to remove all html tags
+                    directives = RobotstxtParser.parse(content, config);
+                } else if (page.getContentType()
+                               .contains(
+                                   "html")) { // TODO This one should be upgraded to remove all
+                    // html tags
                     String content = new String(page.getContentData());
-                    directives = RobotstxtParser.parse(content, config.getUserAgentName());
+                    directives = RobotstxtParser.parse(content, config);
                 } else {
                     logger.warn(
                         "Can't read this robots.txt: {}  as it is not written in plain text, " +
-                        "contentType: {}",
-                        robotsTxtUrl.getURL(), contentType);
+                        "contentType: {}", robotsTxtUrl.getURL(), page.getContentType());
                 }
             } else {
                 logger.debug("Can't read this robots.txt: {}  as it's status code is {}",
@@ -129,6 +155,7 @@ public class RobotstxtServer {
             NoHttpResponseException se) {
             // No logging here, as it just means that robots.txt doesn't exist on this server
             // which is perfectly ok
+            logger.trace("robots.txt probably does not exist.", se);
         } catch (PageBiggerThanMaxSizeException pbtms) {
             logger.error("Error occurred while fetching (robots) url: {}, {}",
                          robotsTxtUrl.getURL(), pbtms.getMessage());
@@ -142,15 +169,16 @@ public class RobotstxtServer {
 
         if (directives == null) {
             // We still need to have this object to keep track of the time we fetched it
-            directives = new HostDirectives();
+            directives = new HostDirectives(config);
         }
         synchronized (host2directivesCache) {
             if (host2directivesCache.size() == config.getCacheSize()) {
                 String minHost = null;
                 long minAccessTime = Long.MAX_VALUE;
                 for (Map.Entry<String, HostDirectives> entry : host2directivesCache.entrySet()) {
-                    if (entry.getValue().getLastAccessTime() < minAccessTime) {
-                        minAccessTime = entry.getValue().getLastAccessTime();
+                    long entryAccessTime = entry.getValue().getLastAccessTime();
+                    if (entryAccessTime < minAccessTime) {
+                        minAccessTime = entryAccessTime;
                         minHost = entry.getKey();
                     }
                 }
